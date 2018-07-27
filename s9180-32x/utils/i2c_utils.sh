@@ -168,6 +168,7 @@ function _i2c_init {
     modprobe i2c_i801
     modprobe i2c_dev
     modprobe i2c_mux_pca954x force_deselect_on_exit=1
+    #modprobe cpld_wdt
 
     if [ ! -e "${PATH_SYS_I2C_DEVICES}/i2c-${NUM_MUX1_CHAN0_DEVICE}" ]; then
         _retry "echo 'pca9548 0x70' > ${PATH_I801_DEVICE}/new_device"
@@ -325,7 +326,7 @@ function _i2c_io_exp_init {
     i2cset -y -r ${NUM_I801_DEVICE} 0x26 5 0x00
     i2cset -y -r ${NUM_I801_DEVICE} 0x26 2 0x3F
     i2cset -y -r ${NUM_I801_DEVICE} 0x26 3 0x1F
-    i2cset -y -r ${NUM_I801_DEVICE} 0x26 6 0xC0
+    i2cset -y -r ${NUM_I801_DEVICE} 0x26 6 0xD0
     i2cset -y -r ${NUM_I801_DEVICE} 0x26 7 0x00
 
     #CPU Baord
@@ -949,7 +950,7 @@ function _i2c_qsfp_eeprom_init {
 
         if [ "${action}" == "new" ] && \
            ! [ -L ${PATH_SYS_I2C_DEVICES}/$eeprombus-$(printf "%04x" $eepromAddr) ]; then
-            echo "sff8436 $eepromAddr" > ${PATH_SYS_I2C_DEVICES}/i2c-$eeprombus/new_device
+            echo "optoe1 $eepromAddr" > ${PATH_SYS_I2C_DEVICES}/i2c-$eeprombus/new_device
         elif [ "${action}" == "delete" ] && \
              [ -L ${PATH_SYS_I2C_DEVICES}/$eeprombus-$(printf "%04x" $eepromAddr) ]; then
             echo "$eepromAddr" > ${PATH_SYS_I2C_DEVICES}/i2c-$eeprombus/delete_device
@@ -1041,7 +1042,7 @@ function _i2c_sfp_eeprom_init {
         return
     fi
 
-    #Init 1-32 ports EEPROM
+    #Init 33-34 ports EEPROM
     if [ "${action}" == "new" ] && \
        ! [ -L ${PATH_SYS_I2C_DEVICES}/${NUM_SFP1_DEVICE}-0050 ] && \
        ! [ -L ${PATH_SYS_I2C_DEVICES}/${NUM_SFP2_DEVICE}-0050 ]; then
