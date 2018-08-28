@@ -131,6 +131,7 @@ I2C_BUS_CPLD2=${NUM_MUX_9548_0_CH1}
 I2C_BUS_CPLD3=${NUM_MUX_9548_0_CH2}
 I2C_BUS_CPLD4=${NUM_MUX_9548_0_CH3}
 I2C_BUS_CPLD5=${NUM_MUX_9548_0_CH4}
+I2C_BUS_ROV=${NUM_MUX_9548_1_CH6}
 
 # I2C BUS path
 PATH_SYS_I2C_DEVICES="/sys/bus/i2c/devices"
@@ -230,6 +231,7 @@ I2C_ADDR_TMP75_BB=0x4A # on bmc board
 I2C_ADDR_QSFP_EEPROM=0x50
 I2C_ADDR_SFP_EEPROM=0x50
 I2C_ADDR_CPLD=0x33
+I2C_ADDR_ROV=0x76
 
 #sysfs
 PATH_SYSFS_PSU1="${PATH_SYS_I2C_DEVICES}/${I2C_BUS_PSU1_EEPROM}-$(printf "%04x" $I2C_ADDR_PSU1_EEPROM)"
@@ -271,6 +273,8 @@ MIN_SFP_PORT_NUM=1
 MAX_SFP_PORT_NUM=2
 
 # CPLD access
+# ROV status
+CPLD_ROV_STATUS_KEY=cpld_rov_status
 # port status
 CPLD_QSFP_STATUS_KEY=cpld_qsfp_port_status
 CPLD_SFP_STATUS_KEY=cpld_sfp_port_status
@@ -289,6 +293,10 @@ fp2led_array=( 1  2  5  6  9 10 13 14  1  2  5  6  9 10 13 14
                1  2  5  6  9 10 13 14  1  2  5  6  9 10 13 14
                3  4  7  8 11 12 15 16  3  4  7  8 11 12 15 16
                3  4  7  8 11 12 15 16  3  4  7  8 11 12 15 16)
+# vdd value for mac
+rov_val_array=( 0.85 0.82 0.77 0.87 0.74 0.84 0.79 0.89 )
+rov_reg_array=( 0x79 0x73 0x69 0x7D 0x63 0x77 0x6D 0x81 )
+
 # Help usage function
 function _help {
     echo "========================================================="
@@ -314,6 +322,7 @@ function _help {
     echo "         : ${0} i2c_sfp_status_get [${MIN_SFP_PORT_NUM}-${MAX_SFP_PORT_NUM}]"
     echo "         : ${0} i2c_qsfp_type_get [${MIN_QSFP_PORT_NUM}-${MAX_QSFP_PORT_NUM}]"
     echo "         : ${0} i2c_sfp_type_get [${MIN_SFP_PORT_NUM}-${MAX_SFP_PORT_NUM}]"
+    echo "         : ${0} i2c_qsfp_ddm_get [${MIN_QSFP_PORT_NUM}-${MAX_QSFP_PORT_NUM}]"
     echo "         : ${0} i2c_board_type_get"
     echo "         : ${0} i2c_bmc_board_type_get"
     echo "         : ${0} i2c_cpld_version"
@@ -501,6 +510,9 @@ function _i2c_init {
     # clear port led
     _util_port_led_clear
 
+    # rov for mac init
+    _mac_vdd_init
+
     # trun on sys led
     echo "led_sys setup..."
     COLOR_LED="green"
@@ -509,6 +521,27 @@ function _i2c_init {
     _i2c_sys_led
 
     _config_rmem
+}
+
+function _mac_vdd_init {
+    # read mac vid register value from CPLD
+    cpld_index=1
+    _i2c_cpld_reg_read ${cpld_index} ${CPLD_ROV_STATUS_KEY}
+    # get vid form register value [0:2]
+    vid=$(($cpld_reg_val & 0x7))
+    # get rov val and reg according to vid
+    rov_val=${rov_val_array[$vid]}
+    rov_reg=${rov_reg_array[$vid]}
+    echo "vid=${vid}, rov_val=${rov_val}, rov_reg=${rov_reg}"
+
+    # write the rov reg to rov
+    i2cset -y -r ${I2C_BUS_ROV} ${I2C_ADDR_ROV} 0x21 ${rov_reg} w
+
+    if [ $? -eq 0 ]; then
+        echo "set ROV for mac vdd done"
+    else
+        echo "set ROV for mac vdd fail"
+    fi
 }
 
 #I2C Deinit
@@ -930,7 +963,6 @@ function _qsfp_cpld_var_set {
     local reg_port_base
     local reg_port_shift
     
-    echo "_qsfp_cpld_var_set port=$port" 
     if [[ $1 -le 12  && $1 -ge 1 ]]; then
         cpld_index=1
         reg_port_base=0
@@ -1229,7 +1261,10 @@ function _i2c_qsfp_type_get {
     _qsfp_eeprom_var_set ${phy_port}
 
     #Get QSFP EEPROM info
-    qsfp_info=$(base64 ${PATH_SYS_I2C_DEVICES}/$eepromBus-$(printf "%04x" $eepromAddr)/eeprom)
+    local size=255
+    eeprom_path="${PATH_SYS_I2C_DEVICES}/$eepromBus-$(printf "%04x" $eepromAddr)/eeprom"
+    #echo "get ${eeprom_path}"
+    qsfp_info=$(dd if=${eeprom_path} bs=${size} count=1 2>/dev/null | base64)
 
     identifier=$(echo $qsfp_info | base64 -d -i | hexdump -s 128 -n 1 -e '"%x"')
     connector=$(echo $qsfp_info | base64 -d -i | hexdump -s 130 -n 1 -e '"%x"')
@@ -1621,8 +1656,6 @@ function _i2c_cpld_reg_read {
 
     reg_file_path="${PATH_SYS_I2C_DEVICES}/${cpld_i2c_bus}-$(printf "%04x" ${cpld_i2c_addr})/${file_name}"
     cpld_reg_val=`cat ${reg_file_path}`
-    # TODO: debug 
-    echo "cat ${reg_file_path} => ${cpld_reg_val}"
 }
 
 #util functions
@@ -1656,7 +1689,6 @@ function _util_get_qsfp_abs {
     #get physical port
     phy_port=$(_port_fp2phy $QSFP_PORT)
 
-    echo "fp port $QSFP_PORT => phy port $phy_port"
     # read status from cpld
     _qsfp_cpld_var_set ${phy_port}
     cpld_reg_file_name="${CPLD_QSFP_STATUS_KEY}_${cpld_port_index}"
@@ -1711,6 +1743,88 @@ function _config_rmem {
     echo "109430400" > /proc/sys/net/core/rmem_max
 }
 
+# util function to get logx value
+function logx {
+    v=$1
+    n=$2
+    logx_res=$(echo "${v} ${n}" | awk '{printf "%f\n",log($1)/log($2)}')
+}
+
+# get qsfp ddm data
+function _i2c_qsfp_ddm_get {
+    local phy_port=0
+
+    phy_port=$(_port_fp2phy ${QSFP_PORT})
+
+    # input parameter validation
+    _util_input_check ${QSFP_PORT} ${MIN_QSFP_PORT_NUM} ${MAX_QSFP_PORT_NUM}
+
+    # check if port presence
+    #status: 0 -> Down, 1 -> Up
+    _util_get_qsfp_abs
+    if [ "${status}" == "0" ]; then
+        echo "port ${QSFP_PORT} not presence"
+        return
+    fi
+
+    _qsfp_eeprom_var_set ${phy_port}
+
+    # Get QSFP EEPROM info
+    # only need first 128 bytes (page0) for ddm parsing
+    local size=128
+    eeprom_path="${PATH_SYS_I2C_DEVICES}/$eepromBus-$(printf "%04x" $eepromAddr)/eeprom"
+    #echo "get ${eeprom_path}"
+    qsfp_info=$(dd if=${eeprom_path} bs=${size} count=1 2>/dev/null | base64)
+
+    # temperature
+    temp_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s 22 -n 1 -e '"%d"')
+    temp_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s 23 -n 1 -e '"%d"')
+    temp=$(echo "$temp_val1 $temp_val2" | awk '{printf "%f\n", $1 + $2/256.0}')
+    #temp=$(( ${temp_val1} + ${temp_val2}/256.0 ))
+    echo "temp=$temp"
+    # voltage
+    volt_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s 26 -n 1 -e '"%d"')
+    volt_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s 27 -n 1 -e '"%d"')
+    #volt=$(((($volt_val1 << 8) | volt_val2) / 10000))
+    volt_val3=$(( ($volt_val1 << 8) | $volt_val2 ))
+    volt=$(echo "$volt_val3" | awk '{printf "%f\n", $1/10000.0}')
+    echo "volt=$volt"
+
+    # 4 channels
+    for i in {0..3};
+    do
+        echo "channel $i:"
+        # txBias
+        offset=$(( 42 + $i*2 ))
+        txBias_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        offset=$(( 43 + $i*2 ))
+        txBias_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        txBias_val3=$(( ($txBias_val1 << 8) | $txBias_val2 ))
+        txBias=$(echo "$txBias_val3" | awk '{printf "%f\n", (131.0*$1)/65535}')
+        echo "   txBias=$txBias"
+        # txPower
+        offset=$(( 50 + $i*2 ))
+        txPower_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        offset=$(( 51 + $i*2 ))
+        txPower_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        txPower_val3=$(( ($txPower_val1 << 8) | $txPower_val2 ))
+        txPower_val4=$(echo "$txPower_val3" | awk '{printf "%f\n", $1*0.0001}')
+        logx $txPower_val4 10
+        txPower=$(echo "$logx_res" | awk '{printf "%f\n", $1*10}')
+        echo "   txPower=$txPower"
+        # rxPower
+        offset=$(( 34 + $i*2 ))
+        rxPower_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        offset=$(( 35 + $i*2 ))
+        rxPower_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        rxPower_val3=$(( ($rxPower_val1 << 8) | $rxPower_val2 ))
+        rxPower_val4=$(echo "$rxPower_val3" | awk '{printf "%f\n", $1*0.0001}')
+        logx $rxPower_val4 10
+        rxPower=$(echo "$logx_res" | awk '{printf "%f\n", $1*10}')
+        echo "   rxPower=$rxPower"
+    done
+}
+
 #Main Function
 function _main {
     tart_time_str=`date`
@@ -1756,6 +1870,8 @@ function _main {
         _i2c_qsfp_type_get
     elif [ "${EXEC_FUNC}" == "i2c_sfp_type_get" ]; then
         _i2c_sfp_type_get
+    elif [ "${EXEC_FUNC}" == "i2c_qsfp_ddm_get" ]; then
+        _i2c_qsfp_ddm_get
     elif [ "${EXEC_FUNC}" == "i2c_led_psu_status_set" ]; then
         _i2c_led_psu_status_set
     elif [ "${EXEC_FUNC}" == "i2c_led_fan_status_set" ]; then

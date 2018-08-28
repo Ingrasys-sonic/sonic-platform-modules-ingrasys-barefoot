@@ -130,6 +130,7 @@ function _help {
     echo "         : ${0} i2c_psu_eeprom_init new|delete"
     echo "         : ${0} i2c_qsfp_status_get [1-34]"
     echo "         : ${0} i2c_qsfp_type_get [1-34]"
+    echo "         : ${0} i2c_qsfp_ddm_get [1-34]"
     echo "         : ${0} i2c_board_type_get"
     echo "         : ${0} i2c_psu_status"
     echo "         : ${0} i2c_led_fan_status_set"
@@ -1097,7 +1098,10 @@ function _i2c_qsfp_type_get {
     _qsfp_eeprom_var_set ${QSFP_PORT}
 
     #Get QSFP EEPROM info
-    qsfp_info=$(base64 ${PATH_SYS_I2C_DEVICES}/$eeprombus-$(printf "%04x" $eepromAddr)/eeprom)
+    local size=255
+    eeprom_path="${PATH_SYS_I2C_DEVICES}/$eeprombus-$(printf "%04x" $eepromAddr)/eeprom"
+    #echo "get ${eeprom_path}"
+    qsfp_info=$(dd if=${eeprom_path} bs=${size} count=1 2>/dev/null | base64)
 
     identifier=$(echo $qsfp_info | base64 -d -i | hexdump -s 128 -n 1 -e '"%x"')
     connector=$(echo $qsfp_info | base64 -d -i | hexdump -s 130 -n 1 -e '"%x"')
@@ -1365,6 +1369,83 @@ function _i2c_psu_status {
     printf "PSU2 Exist:%d PSU2 PW Good:%d\n" $psu2Exist $psu2PwGood
 }
 
+# util function to get logx value
+function logx {
+    v=$1
+    n=$2
+    logx_res=$(echo "${v} ${n}" | awk '{printf "%f\n",log($1)/log($2)}')
+}
+
+# get qsfp ddm data
+function _i2c_qsfp_ddm_get {
+
+    _qsfp_port_i2c_var_set ${QSFP_PORT}
+
+    # check if port presence
+    #status: 0 -> Down, 1 -> Up
+    status=`cat /sys/class/gpio/gpio$(( $(($gpioBase + (${QSFP_PORT} - 1) ^ 1)) ))/value`
+    if [ "${status}" == "0" ]; then
+        echo "port ${QSFP_PORT} not presence"
+        return
+    fi
+
+    _qsfp_eeprom_var_set ${QSFP_PORT}
+
+    # Get QSFP EEPROM info
+    # only need first 128 bytes (page0) for ddm parsing
+    local size=128
+    eeprom_path="${PATH_SYS_I2C_DEVICES}/$eeprombus-$(printf "%04x" $eepromAddr)/eeprom"
+    #echo "get ${eeprom_path}"
+    qsfp_info=$(dd if=${eeprom_path} bs=${size} count=1 2>/dev/null | base64)
+
+    # temperature
+    temp_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s 22 -n 1 -e '"%d"')
+    temp_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s 23 -n 1 -e '"%d"')
+    temp=$(echo "$temp_val1 $temp_val2" | awk '{printf "%f\n", $1 + $2/256.0}')
+    #temp=$(( ${temp_val1} + ${temp_val2}/256.0 ))
+    echo "temp=$temp"
+    # voltage
+    volt_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s 26 -n 1 -e '"%d"')
+    volt_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s 27 -n 1 -e '"%d"')
+    #volt=$(((($volt_val1 << 8) | volt_val2) / 10000))
+    volt_val3=$(( ($volt_val1 << 8) | $volt_val2 ))
+    volt=$(echo "$volt_val3" | awk '{printf "%f\n", $1/10000.0}')
+    echo "volt=$volt"
+
+    # 4 channels
+    for i in {0..3};
+    do
+        echo "channel $i:"
+        # txBias
+        offset=$(( 42 + $i*2 ))
+        txBias_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        offset=$(( 43 + $i*2 ))
+        txBias_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        txBias_val3=$(( ($txBias_val1 << 8) | $txBias_val2 ))
+        txBias=$(echo "$txBias_val3" | awk '{printf "%f\n", (131.0*$1)/65535}')
+        echo "   txBias=$txBias"
+        # txPower
+        offset=$(( 50 + $i*2 ))
+        txPower_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        offset=$(( 51 + $i*2 ))
+        txPower_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        txPower_val3=$(( ($txPower_val1 << 8) | $txPower_val2 ))
+        txPower_val4=$(echo "$txPower_val3" | awk '{printf "%f\n", $1*0.0001}')
+        logx $txPower_val4 10
+        txPower=$(echo "$logx_res" | awk '{printf "%f\n", $1*10}')
+        echo "   txPower=$txPower"
+        # rxPower
+        offset=$(( 34 + $i*2 ))
+        rxPower_val1=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        offset=$(( 35 + $i*2 ))
+        rxPower_val2=$(echo $qsfp_info | base64 -d -i | hexdump -s $offset -n 1 -e '"%d"')
+        rxPower_val3=$(( ($rxPower_val1 << 8) | $rxPower_val2 ))
+        rxPower_val4=$(echo "$rxPower_val3" | awk '{printf "%f\n", $1*0.0001}')
+        logx $rxPower_val4 10
+        rxPower=$(echo "$logx_res" | awk '{printf "%f\n", $1*10}')
+        echo "   rxPower=$rxPower"
+    done
+}
 
 #Main Function
 function _main {
@@ -1411,6 +1492,8 @@ function _main {
         _i2c_qsfp_status_get
     elif [ "${EXEC_FUNC}" == "i2c_qsfp_type_get" ]; then
         _i2c_qsfp_type_get
+    elif [ "${EXEC_FUNC}" == "i2c_qsfp_ddm_get" ]; then
+        _i2c_qsfp_ddm_get
     elif [ "${EXEC_FUNC}" == "i2c_led_fan_status_set" ]; then
         _i2c_led_fan_status_set
     elif [ "${EXEC_FUNC}" == "i2c_led_fan_tray_status_set" ]; then
